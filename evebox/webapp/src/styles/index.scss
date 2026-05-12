@@ -1,0 +1,342 @@
+// Disable smooth scroll, it gets messy with keyboard shortcuts for
+// scrolling.
+$enable-smooth-scroll: false;
+
+// Tighten of the default table spacing in Bootstrap, by default its a
+// little large.
+$table-cell-padding-y: 0.25rem;
+$table-cell-padding-x: 0.25rem;
+
+// Custom dark colors by Anne-Fleur.
+$evebox-warning-color-dark: #3d5f5f;
+$evebox-info-color-dark: #50656f;
+$evebox-danger-color-dark: #72383e;
+$evebox-success-color-dark: #2f4741;
+
+@use "transitions";
+
+@import "bootstrap/scss/functions";
+
+@mixin app-table-variant-dark($color) {
+  $_hover: tint-color($color, 10%);
+  --bs-table-bg: #{$color};
+  --bs-table-color: white;
+  --bs-table-hover-bg: #{$_hover};
+  --bs-table-hover-color: white;
+}
+
+@import "bootstrap/scss/variables";
+@import "bootstrap/scss/variables-dark";
+@import "bootstrap/scss/maps";
+@import "bootstrap/scss/mixins";
+@import "bootstrap/scss/utilities";
+@import "bootstrap/scss/root";
+@import "bootstrap/scss/reboot";
+@import "bootstrap/scss/type";
+@import "bootstrap/scss/images";
+@import "bootstrap/scss/containers";
+@import "bootstrap/scss/grid";
+@import "bootstrap/scss/tables";
+@import "bootstrap/scss/forms";
+@import "bootstrap/scss/buttons";
+@import "bootstrap/scss/transitions";
+@import "bootstrap/scss/dropdown";
+@import "bootstrap/scss/button-group";
+@import "bootstrap/scss/nav";
+@import "bootstrap/scss/navbar";
+@import "bootstrap/scss/modal";
+@import "bootstrap/scss/card";
+@import "bootstrap/scss/badge";
+@import "bootstrap/scss/alert";
+@import "bootstrap/scss/list-group";
+@import "bootstrap/scss/close";
+@import "bootstrap/scss/toasts";
+@import "bootstrap/scss/tooltip";
+@import "bootstrap/scss/popover";
+@import "bootstrap/scss/spinners";
+@import "bootstrap/scss/helpers";
+@import "bootstrap/scss/utilities/api";
+@import "../../node_modules/pretty-print-json/dist/css/pretty-print-json.css";
+
+// App specific style to force the width of an element to 1em.
+.app-w-1 {
+  width: 1em !important;
+  max-width: 1em !important;
+}
+
+.app-refresh-button-wrap {
+  z-index: 2;
+}
+
+.app-refresh-button {
+  width: 7em;
+}
+
+.app-refresh-button-badge {
+  z-index: 3;
+}
+
+.app-event-table {
+  .app-col-timestamp {
+    white-space: nowrap;
+    width: 1%;
+  }
+
+  .app-col-address {
+    white-space: nowrap;
+    width: 1%;
+  }
+
+  .app-col-event-type {
+    white-space: nowrap;
+    width: 1%;
+  }
+
+  .app-col-count {
+    white-space: nowrap;
+    width: 1%;
+  }
+
+  tbody {
+    tr {
+      cursor: pointer;
+    }
+  }
+}
+
+// Pretty-json overrides for dark theme. Not needed for light theme.
+[data-bs-theme="dark"] {
+  .json-container {
+    background-color: inherit !important;
+  }
+}
+
+[data-bs-theme="dark"] {
+  // Override the background color in table headers, as its a little
+  // too dark in the default dark theme.
+  .app-event-table th,
+  .app-detail-table th,
+  .app-count-value-data-table th {
+    background-color: $body-tertiary-bg-dark;
+  }
+
+  // Color overrides for event tables.
+  .app-event-table {
+    tr {
+      --bs-table-border-color: black;
+    }
+
+    .table-info {
+      @include app-table-variant-dark($evebox-info-color-dark);
+    }
+
+    .table-warning {
+      @include app-table-variant-dark($evebox-warning-color-dark);
+    }
+
+    .table-success {
+      @include app-table-variant-dark($evebox-success-color-dark);
+    }
+
+    .table-danger {
+      @include app-table-variant-dark($evebox-danger-color-dark);
+    }
+  }
+}
+
+// Suricata rule highlighting.
+.app-rule {
+  .app-rule-header-action,
+  .app-rule-header-direction,
+  .app-rule-keyword {
+    font-weight: bold;
+  }
+
+  .app-rule-header-proto {
+    font-weight: bold;
+    font-style: italic;
+  }
+
+  .app-rule-header-addr {
+    color: var(--bs-secondary-color);
+  }
+
+  .app-rule-header-port {
+    color: var(--bs-tertiary-color);
+  }
+
+  .app-rule-keyword {
+    color: var(--bs-primary);
+  }
+
+  .app-rule-keyword-value {
+    color: var(--bs-success);
+  }
+}
+
+[data-bs-theme="dark"] {
+  .app-rule {
+    .app-rule-header-addr,
+    .app-rule-header-port {
+      color: inherit;
+    }
+
+    .app-rule-keyword {
+      color: dodgerblue;
+    }
+
+    .app-rule-keyword-value {
+      color: lawngreen;
+    }
+  }
+}
+
+[data-bs-theme="dark"] {
+  .alert-info {
+    --bs-alert-bg: #{$evebox-info-color-dark};
+    --bs-alert-color: white;
+  }
+
+  .alert-warning {
+    --bs-alert-bg: #{$evebox-warning-color-dark};
+    --bs-alert-color: white;
+  }
+
+  .alert-danger {
+    --bs-alert-bg: #{$evebox-danger-color-dark};
+    --bs-alert-color: white;
+  }
+}
+
+// Make an element invisible. Useful when loading then transitioning
+// to visible.
+.invisible {
+  visibility: hidden;
+}
+
+// Allow long values to wrap without forcing pre-formatted whitespace.
+.app-break-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.app-pre-wrap {
+  white-space: pre-wrap;
+}
+
+.app-overflow-hidden {
+  overflow: hidden;
+}
+
+.app-detail-table {
+  td:first-child {
+    padding-left: 1em;
+  }
+
+  td:last-child {
+    padding-right: 1em;
+  }
+
+  tbody {
+    th:first-child {
+      padding-left: 1em;
+      padding-right: 1em;
+    }
+  }
+
+  a:link {
+    text-decoration: none;
+  }
+}
+
+.app-card-body-compact {
+  padding: 2px;
+}
+
+.app-count-value-data-table {
+  table {
+    margin-bottom: 3px;
+  }
+
+  .app-count-col {
+    width: 6em;
+  }
+
+  tbody {
+    tr:last-child {
+      td {
+        border: none;
+      }
+    }
+  }
+}
+
+.app-spinner-button {
+  border: 0;
+  padding: 0;
+}
+
+.app-chart-overview-events {
+  max-height: 180px;
+  height: 180px;
+}
+
+.app-chart-pie-wrap {
+  height: 180px;
+}
+
+.app-chart-pie {
+  max-height: 150px;
+  height: 150px;
+}
+
+.app-chart-alerts {
+  max-height: 250px;
+  height: 300px;
+}
+
+.app-chart-stats {
+  height: 200px;
+  width: 100%;
+}
+
+.app-hex-row,
+.app-hex-cell {
+  padding: 0;
+  margin: 0;
+}
+
+.app-hex-pre {
+  margin: 0;
+  padding: 0;
+}
+
+// Used to hide "filter" buttons. We use opacity so the space is
+// reserved, preventing reflow on hover.
+.app-show-on-hover {
+  opacity: 0;
+}
+
+td:hover .app-show-on-hover,
+td:focus-within .app-show-on-hover,
+tr:hover .app-show-on-hover,
+tr:focus-within .app-show-on-hover {
+  opacity: 1;
+}
+
+.app-filter-button-for,
+.app-filter-button-out {
+  &:hover {
+    text-decoration: none;
+    color: inherit;
+    background: none;
+  }
+}
+
+.app-filter-button-out {
+  border-color: $danger;
+
+  &:hover {
+    border-color: $danger;
+  }
+}
