@@ -1,0 +1,343 @@
+// SPDX-FileCopyrightText: (C) 2020 Jason Ish <jason@codemonkey.net>
+// SPDX-License-Identifier: MIT
+
+use crate::prelude::*;
+
+use crate::{eve::Eve, sqlite::EveBoxSqlxErrorExt, sqlite::has_table};
+use anyhow::Context;
+use sqlx::Connection;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct SqliteEventConsumerMetrics {
+    total_duration: Duration,
+    occurrences: u64,
+    events: usize,
+    min: Duration,
+    max: Duration,
+    lock_errors: u64,
+}
+
+impl SqliteEventConsumerMetrics {
+    fn update(&mut self, duration: Duration, events: usize) {
+        if duration > self.max {
+            self.max = duration;
+        }
+        if self.occurrences == 0 || duration < self.min {
+            self.min = duration;
+        }
+
+        self.total_duration += duration;
+        self.occurrences += 1;
+        self.events += events;
+    }
+}
+
+impl std::fmt::Display for SqliteEventConsumerMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let avg_duration = self.total_duration.as_millis() / self.occurrences as u128;
+        let avg_duration = Duration::from_millis(avg_duration as u64);
+        write!(
+            f,
+            "avg={:?}, occurrences={}, events={}, min={:?}, max={:?}, lock_errors={}",
+            avg_duration, self.occurrences, self.events, self.min, self.max, self.lock_errors
+        )
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum IndexError {
+    #[error("event has no timestamp field")]
+    TimestampMissing,
+}
+
+struct PreparedEvent {
+    ts: i64,
+    archived: u8,
+    source_values: String,
+    event: String,
+}
+
+pub(crate) struct SqliteEventSink {
+    conn: Arc<tokio::sync::Mutex<sqlx::SqliteConnection>>,
+    queue: Vec<PreparedEvent>,
+    metrics: Arc<Mutex<SqliteEventConsumerMetrics>>,
+    server_metrics: Arc<crate::server::metrics::Metrics>,
+}
+
+impl Clone for SqliteEventSink {
+    fn clone(&self) -> Self {
+        Self {
+            conn: self.conn.clone(),
+            queue: Vec::new(),
+            metrics: self.metrics.clone(),
+            server_metrics: self.server_metrics.clone(),
+        }
+    }
+}
+
+impl SqliteEventSink {
+    pub fn new(
+        conn: Arc<tokio::sync::Mutex<sqlx::SqliteConnection>>,
+        server_metrics: Arc<crate::server::metrics::Metrics>,
+    ) -> Self {
+        Self {
+            conn,
+            queue: Vec::new(),
+            metrics: server_metrics.sqlite_event_consumer.clone(),
+            server_metrics,
+        }
+    }
+
+    fn prep(&mut self, mut event: serde_json::Value) -> Result<PreparedEvent, IndexError> {
+        let ts = event.datetime().ok_or(IndexError::TimestampMissing)?;
+        reformat_timestamps(&mut event);
+        let source_values = extract_values(&event);
+        let archived = if event.has_tag("evebox.archived") {
+            1
+        } else {
+            0
+        };
+        let prepared = PreparedEvent {
+            ts: ts.to_nanos(),
+            source_values,
+            event: event.to_string(),
+            archived,
+        };
+        Ok(prepared)
+    }
+
+    pub async fn submit(&mut self, event: serde_json::Value) -> Result<bool, IndexError> {
+        let prepared = self.prep(event)?;
+        self.queue.push(prepared);
+        Ok(false)
+    }
+
+    pub async fn commit(&mut self) -> anyhow::Result<usize> {
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            match self.commit_with_sqlx().await {
+                Ok(n) => return Ok(n),
+                Err(err) => {
+                    if let Some(sqlxerr) = err.downcast_ref::<sqlx::Error>()
+                        && sqlxerr.is_locked()
+                        && tries < 35
+                    {
+                        if let Ok(mut metrics) = self.metrics.lock() {
+                            metrics.lock_errors += 1;
+                        }
+                        tokio::time::sleep(Duration::from_millis(2000)).await;
+                        continue;
+                    }
+                    return Err(err).with_context(|| format!("retries={tries}"));
+                }
+            }
+        }
+    }
+
+    async fn commit_with_sqlx(&mut self) -> anyhow::Result<usize> {
+        let start = std::time::Instant::now();
+        let lock_start = std::time::Instant::now();
+        let mut conn = self.conn.lock().await;
+        let lock_elapsed = lock_start.elapsed();
+
+        let insert_start = std::time::Instant::now();
+        let mut tx = conn
+            .begin()
+            .await
+            .with_context(|| "Failed to begin transaction")?;
+        let fts = has_table(&mut *tx, "fts").await?;
+        for (count, event) in self.queue.iter().enumerate() {
+            sqlx::query(
+                r#"
+                INSERT INTO events (timestamp, archived, source, source_values)
+                VALUES (?, ?, ?, ?)
+            "#,
+            )
+            .bind(event.ts)
+            .bind(event.archived)
+            .bind(&event.event)
+            .bind(&event.source_values)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("Insert into events failed: event #{count}"))?;
+
+            if fts {
+                sqlx::query(
+                    r#"
+                        INSERT INTO fts (rowid, timestamp, source_values)
+                        VALUES (last_insert_rowid(), ?, ?)"#,
+                )
+                .bind(event.ts)
+                .bind(&event.source_values)
+                .execute(&mut *tx)
+                .await
+                .with_context(|| format!("Insert into fts failed: event #{count}"))?;
+            }
+        }
+        let insert_elapsed = insert_start.elapsed();
+
+        let commit_start = std::time::Instant::now();
+        tx.commit()
+            .await
+            .with_context(|| "Transaction commit failed")?;
+        let commit_elapsed = commit_start.elapsed();
+
+        let n = self.queue.len();
+
+        let elapsed = start.elapsed();
+        let in_lock = insert_start.elapsed();
+
+        let msg = format!(
+            "Commited {n} events in {elapsed:?}: lock={lock_elapsed:?}, insert={insert_elapsed:?}, commit={commit_elapsed:?}"
+        );
+
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.update(insert_elapsed + commit_elapsed, n);
+
+        // For slow insert, that is the amount of time inside the
+        // lock, log a message.
+        //
+        // While we do care about total time, which means time waiting
+        // on the lock, I'm currently looking for slow activity in the
+        // lock.
+        if in_lock > Duration::from_secs(3) {
+            warn!(
+                "Commit took longer than 3s: {} -- {}",
+                msg,
+                metrics.to_string()
+            );
+        } else {
+            trace!("{}: {}", msg, metrics.to_string());
+        }
+
+        self.queue.truncate(0);
+        Ok(n)
+    }
+
+    pub fn pending(&self) -> usize {
+        self.queue.len()
+    }
+}
+
+fn reformat_timestamps(eve: &mut serde_json::Value) {
+    if let serde_json::Value::String(ts) = &eve["timestamp"] {
+        eve["timestamp"] = reformat_timestamp(ts).into();
+    }
+
+    if let serde_json::Value::String(ts) = &eve["flow"]["start"] {
+        eve["flow"]["start"] = reformat_timestamp(ts).into();
+    }
+
+    if let serde_json::Value::String(ts) = &eve["flow"]["end"] {
+        eve["flow"]["end"] = reformat_timestamp(ts).into();
+    }
+}
+
+fn reformat_timestamp(ts: &str) -> String {
+    if let Ok(dt) = crate::datetime::parse(ts, None) {
+        dt.to_rfc3339_utc()
+    } else {
+        ts.to_string()
+    }
+}
+
+/// Extract the values from the JSON and return them as a string,
+/// space separated.
+///
+/// Simple values like null and bools are not returned. Also known
+/// non-printable values (like base64 data) is not included. This is
+/// used as the input to the full text search engine.
+///
+/// Special handling:
+/// - `payload_printable` and `http.http_response_body_printable`: These contain
+///   decoded binary data that often produces noisy, non-meaningful tokens.
+///   Only alphanumeric words of 2+ characters are extracted.
+pub(crate) fn extract_values(input: &serde_json::Value) -> String {
+    fn push_word(output: &mut String, bytes: &[u8]) {
+        if bytes.len() < 2 {
+            return;
+        }
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        output.push_str(&String::from_utf8_lossy(bytes));
+    }
+
+    fn extract_printable_words(input: &str, output: &mut String) {
+        let mut start: Option<usize> = None;
+        for (idx, b) in input.as_bytes().iter().copied().enumerate() {
+            let is_alnum = matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z');
+            if is_alnum {
+                if start.is_none() {
+                    start = Some(idx);
+                }
+            } else if let Some(s) = start.take() {
+                push_word(output, &input.as_bytes()[s..idx]);
+            }
+        }
+        if let Some(s) = start.take() {
+            push_word(output, &input.as_bytes()[s..]);
+        }
+    }
+
+    fn inner<'a>(input: &'a serde_json::Value, output: &mut String, path: &mut Vec<&'a str>) {
+        match input {
+            serde_json::Value::Null | serde_json::Value::Bool(_) => {
+                // Intentionally empty.
+            }
+            serde_json::Value::Number(n) => {
+                if !output.is_empty() {
+                    output.push(' ');
+                }
+                output.push_str(&n.to_string());
+            }
+            serde_json::Value::String(s) => {
+                // Printable fields contain decoded binary that produces noisy tokens,
+                // so extract only alphanumeric words of 2+ characters.
+                let is_printable_field = path == &["payload_printable"]
+                    || path == &["http", "http_response_body_printable"];
+                if is_printable_field {
+                    extract_printable_words(s, output);
+                } else {
+                    if !output.is_empty() {
+                        output.push(' ');
+                    }
+                    output.push_str(s);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for e in a {
+                    inner(e, output, path);
+                }
+            }
+            serde_json::Value::Object(o) => {
+                for (k, v) in o {
+                    match k.as_ref() {
+                        // Skip base64 encoded fields.
+                        "packet" | "payload" => {}
+                        // Skip alert rule metadata.
+                        "rule" => {}
+                        _ => {
+                            path.push(k);
+                            // Skip base64 encoded field.
+                            if path != &["http", "http_response_body"] {
+                                inner(v, output, path);
+                            }
+                            path.pop();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut flattened = String::new();
+    let mut path = Vec::with_capacity(8);
+    inner(input, &mut flattened, &mut path);
+    flattened
+}
